@@ -1,597 +1,376 @@
 #include <iostream>
 #include <vector>
-#include <cmath>
-#include <unordered_map>
+#include <map>
 #include <queue>
-#include <algorithm>
+#define _USE_MATH_DEFINES   
+#include <cmath>
 #include <fstream>
-#include <sndfile.h>
-#include <bitset>
 #include <cstring>
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include <memory>
+#include <algorithm>
+#include <sndfile.h>
 
-// Debug flag for verbose output
-#define DEBUG 1
+using namespace std;
 
-class AudioCompressor {
-public:
-    // Discrete Cosine Transform (DCT)
-    static std::vector<double> discreteCosineTransform(const std::vector<double>& signal) {
-        int N = signal.size();
-        
-        // Check if the signal vector is empty
-        if (N == 0) {
-            std::cerr << "Error: Signal vector is empty." << std::endl;
-            return {};
-        }
-        
-        // Limit the size of N for performance - but handle safely
-        const int MAX_DCT_SIZE = 8192;
-        if (N > MAX_DCT_SIZE) {
-            if (DEBUG) std::cout << "Warning: DCT input size " << N << " is too large. Processing in blocks..." << std::endl;
-            
-            // Instead of downsampling, let's process in blocks
-            std::vector<double> result(MAX_DCT_SIZE, 0.0);
-            const int BLOCK_SIZE = N / MAX_DCT_SIZE;
-            
-            if (DEBUG) std::cout << "Using block size: " << BLOCK_SIZE << std::endl;
-            
-            // Process each frequency bin
-            for (int u = 0; u < MAX_DCT_SIZE; ++u) {
-                if (DEBUG && u % 1000 == 0) {
-                    std::cout << "  DCT processing bin " << u << " of " << MAX_DCT_SIZE << std::endl;
-                }
-                
-                double sum = 0.0;
-                double scaling = (u == 0) ? sqrt(1.0 / MAX_DCT_SIZE) : sqrt(2.0 / MAX_DCT_SIZE);
-                
-                // Process in blocks to reduce memory access patterns
-                for (int block = 0; block < MAX_DCT_SIZE; ++block) {
-                    int i = block * BLOCK_SIZE;
-                    if (i < N) {
-                        sum += signal[i] * std::cos((M_PI * u * (2.0 * block + 1.0)) / (2.0 * MAX_DCT_SIZE)) * scaling;
-                    }
-                }
-                
-                result[u] = sum;
-            }
-            
-            if (DEBUG) std::cout << "Block DCT processing complete." << std::endl;
-            return result;
-        }
-    
-        std::vector<double> dctCoeffs(N, 0.0);
-        
-        if (DEBUG) std::cout << "Starting DCT calculation for " << N << " coefficients..." << std::endl;
-        int progressInterval = std::max(1, N / 10);
-        
-        for (int u = 0; u < N; ++u) {
-            if (DEBUG && u % progressInterval == 0) {
-                std::cout << "  DCT progress: " << (u * 100 / N) << "% (" << u << "/" << N << ")" << std::endl;
-            }
-            
-            double sum = 0.0;
-    
-            for (int i = 0; i < N; ++i) {
-                // Validate input values
-                if (!std::isfinite(signal[i])) {
-                    std::cerr << "Error: Invalid value at index " << i << ": " << signal[i] << std::endl;
-                    return {};
-                }
-                
-                // Scaling factor
-                double scaling = (u == 0) ? sqrt(1.0 / N) : sqrt(2.0 / N);
-    
-                // Compute DCT safely
-                sum += signal[i] * std::cos((M_PI * u * (2.0 * i + 1.0)) / (2.0 * N)) * scaling;
-            }
-            
-            dctCoeffs[u] = sum;
-        }
-        
-        if (DEBUG) std::cout << "DCT calculation complete." << std::endl;
-        return dctCoeffs;
-    }
-    
-    // Simplified DCT for large inputs
-    static std::vector<double> simplifiedDCT(const std::vector<double>& signal) {
-        const int MAX_OUTPUT_SIZE = 8192;
-        
-        if (DEBUG) std::cout << "Using simplified DCT for large input..." << std::endl;
-        
-        std::vector<double> result(MAX_OUTPUT_SIZE, 0.0);
-        int n = signal.size();
-        
-        // Simple sampling of the original signal
-        for (int i = 0; i < MAX_OUTPUT_SIZE; i++) {
-            if (i % 1000 == 0 && DEBUG) {
-                std::cout << "  Processing simplified DCT bin " << i << " of " << MAX_OUTPUT_SIZE << std::endl;
-            }
-            
-            // Take average of a block to avoid aliasing
-            int64_t blockStart = (int64_t)i * n / MAX_OUTPUT_SIZE;
-            int64_t blockEnd = (int64_t)(i + 1) * n / MAX_OUTPUT_SIZE;
-            blockEnd = std::min(blockEnd, (int64_t)n);
-            
-            double sum = 0.0;
-            int count = 0;
-            
-            for (int64_t j = blockStart; j < blockEnd; j++) {
-                if (std::isfinite(signal[j])) {
-                    sum += signal[j];
-                    count++;
-                }
-            }
-            
-            if (count > 0) {
-                result[i] = sum / count;
-            } else {
-                result[i] = 0.0;
-            }
-        }
-        
-        if (DEBUG) std::cout << "Simplified DCT complete." << std::endl;
-        return result;
-    }
-    
-    // Run-Length Encoding (RLE)
-    static std::vector<std::pair<double, int>> runLengthEncode(const std::vector<double>& signal) {
-        std::vector<std::pair<double, int>> encoded;
-        
-        if (signal.empty()) return encoded;
+const int CHUNK_SIZE = 1024;
+const int QUANTIZATION_FACTOR = 100;
 
-        // Use a higher precision threshold for comparison
-        const double THRESHOLD = 1e-4;
-        
-        if (DEBUG) std::cout << "Starting RLE with threshold " << THRESHOLD << "..." << std::endl;
-        
-        double currentValue = signal[0];
-        int count = 1;
-        int progress = 0;
-        int progressInterval = std::max(1, (int)signal.size() / 10);
-
-        for (size_t i = 1; i < signal.size(); ++i) {
-            if (DEBUG && i % progressInterval == 0) {
-                std::cout << "  RLE progress: " << (i * 100 / signal.size()) << "% (" << i << "/" << signal.size() << ")" << std::endl;
-            }
-            
-            if (std::abs(signal[i] - currentValue) < THRESHOLD) {
-                count++;
-            } else {
-                encoded.push_back({currentValue, count});
-                currentValue = signal[i];
-                count = 1;
-            }
-            
-            // Safety check to prevent memory issues with very large input
-            if (encoded.size() > 1000000) {
-                std::cerr << "Error: RLE producing too many segments. Increasing threshold." << std::endl;
-                // Double the threshold and restart
-                return runLengthEncode(signal, THRESHOLD * 2);
-            }
-        }
-        
-        // Add the last run
-        encoded.push_back({currentValue, count});
-        
-        if (DEBUG) std::cout << "RLE complete. Compressed from " << signal.size() << " to " << encoded.size() << " elements." << std::endl;
-        return encoded;
-    }
-    
-    // Run-Length Encoding with custom threshold
-    static std::vector<std::pair<double, int>> runLengthEncode(const std::vector<double>& signal, double threshold) {
-        std::vector<std::pair<double, int>> encoded;
-        
-        if (signal.empty()) return encoded;
-        
-        if (DEBUG) std::cout << "Starting RLE with increased threshold " << threshold << "..." << std::endl;
-        
-        double currentValue = signal[0];
-        int count = 1;
-
-        for (size_t i = 1; i < signal.size(); ++i) {
-            if (std::abs(signal[i] - currentValue) < threshold) {
-                count++;
-            } else {
-                encoded.push_back({currentValue, count});
-                currentValue = signal[i];
-                count = 1;
-            }
-            
-            // Safety check
-            if (encoded.size() > 1000000) {
-                std::cerr << "Error: RLE still producing too many segments. Using quantization." << std::endl;
-                return quantizeAndEncode(signal, threshold * 5);
-            }
-        }
-        
-        // Add the last run
-        encoded.push_back({currentValue, count});
-        
-        if (DEBUG) std::cout << "RLE complete with custom threshold. Compressed to " << encoded.size() << " elements." << std::endl;
-        return encoded;
-    }
-    
-    // Quantization and encoding for difficult signals
-    static std::vector<std::pair<double, int>> quantizeAndEncode(const std::vector<double>& signal, double quantStep) {
-        if (DEBUG) std::cout << "Using quantization with step " << quantStep << "..." << std::endl;
-        
-        std::vector<double> quantized(signal.size());
-        for (size_t i = 0; i < signal.size(); i++) {
-            quantized[i] = std::round(signal[i] / quantStep) * quantStep;
-        }
-        
-        return runLengthEncode(quantized);
-    }
-
-    // Adaptive Huffman Coding
-    class AdaptiveHuffmanCoder {
-    private:
-        struct Node {
-            double value;
-            int weight;
-            int number;
-            Node* parent;
-            Node* left;
-            Node* right;
-
-            Node(double val, int w, int num, Node* p = nullptr) 
-                : value(val), weight(w), number(num), parent(p), 
-                  left(nullptr), right(nullptr) {}
-        };
-
-        Node* NYT;
-        Node* root;
-        std::unordered_map<double, Node*> symbolTable;
-        int nodeNumberCounter;
-        int encodedSymbolCount;
-        const int MAX_SYMBOLS = 1000000;  // Safety limit
-
-        Node* findHighestInBlock(Node* start, int weight) {
-            if (!start) return nullptr;
-            
-            std::queue<Node*> q;
-            q.push(start);
-            Node* result = nullptr;
-            
-            while (!q.empty()) {
-                Node* current = q.front();
-                q.pop();
-                
-                if (current->weight == weight && 
-                    (!result || current->number > result->number)) {
-                    result = current;
-                }
-                
-                if (current->left) q.push(current->left);
-                if (current->right) q.push(current->right);
-            }
-            
-            return result;
-        }
-
-        void swapNodes(Node* a, Node* b) {
-            if (!a || !b || a == b) return;
-            
-            // Handle the case where they are siblings
-            if (a->parent == b->parent) {
-                if (a->parent->left == a) {
-                    a->parent->left = b;
-                    a->parent->right = a;
-                } else {
-                    a->parent->left = a;
-                    a->parent->right = b;
-                }
-                std::swap(a->number, b->number);
-                return;
-            }
-            
-            // Handle normal case
-            Node* aParent = a->parent;
-            Node* bParent = b->parent;
-            
-            if (aParent->left == a) aParent->left = b;
-            else aParent->right = b;
-            
-            if (bParent->left == b) bParent->left = a;
-            else bParent->right = a;
-            
-            b->parent = aParent;
-            a->parent = bParent;
-            
-            std::swap(a->number, b->number);
-        }
-
-        void updateTree(Node* currentNode) {
-            int maxIterations = 100; // Safety limit
-            int iterations = 0;
-            
-            while (currentNode && iterations < maxIterations) {
-                Node* highestInBlock = findHighestInBlock(root, currentNode->weight);
-                
-                if (highestInBlock && highestInBlock != currentNode && 
-                    highestInBlock != currentNode->parent &&
-                    currentNode != highestInBlock->parent) {
-                    swapNodes(currentNode, highestInBlock);
-                }
-                
-                currentNode->weight++;
-                currentNode = currentNode->parent;
-                iterations++;
-            }
-            
-            if (iterations >= maxIterations && DEBUG) {
-                std::cout << "Warning: Max iterations reached in updateTree" << std::endl;
-            }
-        }
-
-        std::string getCode(Node* node) {
-            std::string code;
-            Node* current = node;
-            
-            // Safety limit
-            int maxDepth = 100;
-            int depth = 0;
-            
-            while (current->parent && depth < maxDepth) {
-                if (current->parent->left == current) {
-                    code += '0';
-                } else {
-                    code += '1';
-                }
-                current = current->parent;
-                depth++;
-            }
-            
-            std::reverse(code.begin(), code.end());
-            return code;
-        }
-
-    public:
-        AdaptiveHuffmanCoder() {
-            NYT = new Node(0.0, 0, 512);
-            root = NYT;
-            symbolTable.clear();
-            nodeNumberCounter = 511;
-            encodedSymbolCount = 0;
-        }
-
-        ~AdaptiveHuffmanCoder() {
-            // Simple cleanup for demo purposes
-            // A full implementation would require a proper tree traversal and deletion
-        }
-
-        std::string encode(double symbol) {
-            // Check for invalid symbols
-            if (!std::isfinite(symbol)) {
-                std::cerr << "Error: Invalid symbol detected in Huffman encoding: " << symbol << std::endl;
-                return "ERROR";
-            }
-            
-            // Safety check for maximum encoding size
-            if (encodedSymbolCount++ > MAX_SYMBOLS) {
-                std::cerr << "Error: Too many symbols encoded. Aborting." << std::endl;
-                return "ERROR";
-            }
-            
-            if (DEBUG && encodedSymbolCount % 1000 == 0) {
-                std::cout << "  Huffman encoding symbol #" << encodedSymbolCount << ": " << symbol << std::endl;
-            }
-            
-            std::string code;
-            
-            if (symbolTable.find(symbol) != symbolTable.end()) {
-                Node* symbolNode = symbolTable[symbol];
-                code = getCode(symbolNode);
-                updateTree(symbolNode);
-            } else {
-                code = getCode(NYT);
-                
-                // Simplify encoding for large numbers to prevent overflow
-                // Instead of using the full 64-bit representation, quantize to 32-bit
-                std::string binary;
-                int32_t intValue = static_cast<int32_t>(symbol * 1000000.0); // Scale for precision
-                
-                for (int i = 0; i < 32; i++) {
-                    binary = ((intValue & 1) ? "1" : "0") + binary;
-                    intValue >>= 1;
-                }
-                code += binary;
-                
-                Node* newNYT = new Node(0.0, 0, nodeNumberCounter--, NYT);
-                Node* symbolNode = new Node(symbol, 1, nodeNumberCounter--, NYT);
-                
-                NYT->left = newNYT;
-                NYT->right = symbolNode;
-                NYT->value = 0.0;
-                NYT->weight = 1;
-                
-                symbolTable[symbol] = symbolNode;
-                NYT = newNYT;
-                
-                updateTree(symbolNode->parent);
-            }
-            
-            return code;
-        }
-
-        // Static methods for file operations
-        static bool compressAudioFile(const std::string& inputFile, const std::string& outputFile) {
-            if (DEBUG) std::cout << "===========================================" << std::endl;
-            if (DEBUG) std::cout << "Starting compression process..." << std::endl;
-            if (DEBUG) std::cout << "===========================================" << std::endl;
-            
-            // Open input audio file
-            if (DEBUG) std::cout << "Opening input audio file: " << inputFile << std::endl;
-            SF_INFO sfInfo;
-            sfInfo.format = 0;
-            SNDFILE* infile = sf_open(inputFile.c_str(), SFM_READ, &sfInfo);
-            
-            if (!infile) {
-                std::cerr << "Error opening input file: " << inputFile << std::endl;
-                return false;
-            }
-
-            // Print audio file info
-            if (DEBUG) {
-                std::cout << "Audio file info:" << std::endl;
-                std::cout << "  Frames: " << sfInfo.frames << std::endl;
-                std::cout << "  Channels: " << sfInfo.channels << std::endl;
-                std::cout << "  Sample rate: " << sfInfo.samplerate << std::endl;
-                std::cout << "  Total samples: " << (sfInfo.frames * sfInfo.channels) << std::endl;
-            }
-
-            // Read audio data
-            if (DEBUG) std::cout << "Reading audio data..." << std::endl;
-            std::vector<double> audioData(sfInfo.frames * sfInfo.channels);
-            sf_count_t count = sf_read_double(infile, audioData.data(), audioData.size());
-            sf_close(infile);
-
-            if (DEBUG) std::cout << "Read " << count << " samples of " << audioData.size() << " expected." << std::endl;
-
-            if (count == 0) {
-                std::cerr << "No data read from input file" << std::endl;
-                return false;
-            }
-            
-            // Resize to actual read size if needed
-            if (count < audioData.size()) {
-                if (DEBUG) std::cout << "Resizing audio data to actual read size." << std::endl;
-                audioData.resize(count);
-            }
-
-            // Check for NaN or Inf values
-            if (DEBUG) std::cout << "Checking for invalid audio samples..." << std::endl;
-            int invalidCount = 0;
-            for (size_t i = 0; i < audioData.size(); i++) {
-                if (!std::isfinite(audioData[i])) {
-                    invalidCount++;
-                    audioData[i] = 0.0; // Replace with a safe value
-                }
-            }
-            if (invalidCount > 0) {
-                std::cout << "Warning: Found and fixed " << invalidCount << " invalid audio samples." << std::endl;
-            }
-
-            // For large inputs, use a simpler approach
-            std::vector<double> processedData;
-            if (audioData.size() > 100000) {
-                if (DEBUG) std::cout << "===========================================" << std::endl;
-                if (DEBUG) std::cout << "Using simplified processing for large input..." << std::endl;
-                processedData = simplifiedDCT(audioData);
-            } else {
-                // Apply Discrete Cosine Transform
-                if (DEBUG) std::cout << "===========================================" << std::endl;
-                if (DEBUG) std::cout << "Applying Discrete Cosine Transform..." << std::endl;
-                processedData = discreteCosineTransform(audioData);
-            }
-            
-            if (DEBUG) std::cout << "Signal processing completed! Produced " << processedData.size() << " coefficients." << std::endl;
-
-            // Apply Run-Length Encoding
-            if (DEBUG) std::cout << "===========================================" << std::endl;
-            if (DEBUG) std::cout << "Applying Run-Length Encoding..." << std::endl;
-            std::vector<std::pair<double, int>> rleEncoded = runLengthEncode(processedData);
-            if (DEBUG) std::cout << "RLE completed! Encoded size: " << rleEncoded.size() << " pairs." << std::endl;
-
-            // Apply Adaptive Huffman Coding
-            if (DEBUG) std::cout << "===========================================" << std::endl;
-            if (DEBUG) std::cout << "Applying Adaptive Huffman Encoding..." << std::endl;
-            AdaptiveHuffmanCoder huffmanCoder;
-            std::vector<std::string> encodedSymbols;
-            
-            // Progress tracking
-            size_t totalPairs = rleEncoded.size();
-            size_t progressInterval = std::max(size_t(1), totalPairs / 20);
-            
-            // Limit the maximum number of pairs to encode
-            const size_t MAX_PAIRS = 100000;
-            if (totalPairs > MAX_PAIRS) {
-                if (DEBUG) std::cout << "Too many RLE pairs (" << totalPairs << "). Limiting to " << MAX_PAIRS << std::endl;
-                totalPairs = MAX_PAIRS;
-            }
-            
-            for (size_t i = 0; i < totalPairs; ++i) {
-                const auto& coeff = rleEncoded[i];
-                
-                if (DEBUG && i % progressInterval == 0) {
-                    std::cout << "  Huffman progress: " << (i * 100 / totalPairs) << "% (" << i << "/" << totalPairs << ")" << std::endl;
-                }
-                
-                // Encode both the value and the run length
-                std::string valueCode = huffmanCoder.encode(coeff.first);
-                if (valueCode == "ERROR") {
-                    std::cerr << "Error during Huffman encoding. Aborting." << std::endl;
-                    return false;
-                }
-                
-                std::string countCode = huffmanCoder.encode(static_cast<double>(coeff.second));
-                if (countCode == "ERROR") {
-                    std::cerr << "Error during Huffman encoding. Aborting." << std::endl;
-                    return false;
-                }
-                
-                encodedSymbols.push_back(valueCode + "|" + countCode);
-            }
-            
-            if (DEBUG) std::cout << "Huffman encoding completed! Produced " << encodedSymbols.size() << " encoded symbols." << std::endl;
-
-            // Write compressed data to output file
-            if (DEBUG) std::cout << "===========================================" << std::endl;
-            if (DEBUG) std::cout << "Writing compressed data to file: " << outputFile << std::endl;
-            std::ofstream outfile(outputFile, std::ios::binary);
-            if (!outfile) {
-                std::cerr << "Error creating output file: " << outputFile << std::endl;
-                return false;
-            }
-
-            // Write metadata
-            outfile << sfInfo.frames << " " 
-                    << sfInfo.channels << " " 
-                    << sfInfo.samplerate << std::endl;
-
-            // Write encoded symbols
-            size_t writtenSymbols = 0;
-            for (const auto& symbol : encodedSymbols) {
-                outfile << symbol << std::endl;
-                writtenSymbols++;
-                
-                if (DEBUG && writtenSymbols % 10000 == 0) {
-                    std::cout << "  Writing progress: " << (writtenSymbols * 100 / encodedSymbols.size()) 
-                              << "% (" << writtenSymbols << "/" << encodedSymbols.size() << ")" << std::endl;
-                }
-            }
-
-            outfile.close();
-            if (DEBUG) std::cout << "File writing completed!" << std::endl;
-            if (DEBUG) std::cout << "===========================================" << std::endl;
-            return true;
-        }
-    };
+// Audio metadata storage
+struct AudioMetadata {
+    int samplerate;
+    int channels;
+    sf_count_t frames;
 };
 
+// --- DCT Functions ---
+vector<vector<double>> precomputeDCTMatrix(int N) {
+    vector<vector<double>> dctMatrix(N, vector<double>(N));
+    for (int k = 0; k < N; ++k) {
+        double scale = (k == 0) ? sqrt(1.0/N) : sqrt(2.0/N);
+        for (int n = 0; n < N; ++n) {
+            dctMatrix[k][n] = scale * cos(M_PI * k * (2 * n + 1) / (2.0 * N));
+        }
+    }
+    return dctMatrix;
+}
+
+vector<double> applyDCT(const vector<int16_t>& signal, int start, int length, const vector<vector<double>>& dctMatrix) {
+    vector<double> transformed(length, 0.0);
+    for (int k = 0; k < length; ++k) {
+        for (int n = 0; n < length; ++n) {
+            transformed[k] += signal[start + n] * dctMatrix[k][n];
+        }
+    }
+    return transformed;
+}
+
+vector<int16_t> inverseDCT(const vector<double>& transformed, const vector<vector<double>>& dctMatrix) {
+    int length = transformed.size();
+    vector<int16_t> signal(length, 0);
+    for (int n = 0; n < length; ++n) {
+        double sum = 0.0;
+        for (int k = 0; k < length; ++k) {
+            sum += transformed[k] * dctMatrix[k][n];
+        }
+        signal[n] = static_cast<int16_t>(round(sum));
+    }
+    return signal;
+}
+
+// --- Run-Length Encoding ---
+vector<pair<int, int>> runLengthEncode(const vector<int>& data) {
+    vector<pair<int, int>> encoded;
+    if (data.empty()) return encoded;
+    
+    int prev = data[0];
+    int count = 1;
+    for (size_t i = 1; i < data.size(); ++i) {
+        if (data[i] == prev) {
+            count++;
+        } else {
+            encoded.emplace_back(prev, count);
+            prev = data[i];
+            count = 1;
+        }
+    }
+    encoded.emplace_back(prev, count);
+    return encoded;
+}
+
+vector<int> runLengthDecode(const vector<pair<int, int>>& encoded) {
+    vector<int> decoded;
+    for (const auto& pair : encoded) {
+        decoded.insert(decoded.end(), pair.second, pair.first);
+    }
+    return decoded;
+}
+
+// --- Huffman Encoding ---
+struct HuffmanNode {
+    int symbol;
+    int frequency;
+    unique_ptr<HuffmanNode> left;
+    unique_ptr<HuffmanNode> right;
+
+    HuffmanNode(int sym, int freq) : symbol(sym), frequency(freq) {}
+};
+
+struct CompareNode {
+    bool operator()(const HuffmanNode* lhs, const HuffmanNode* rhs) const {
+        return lhs->frequency > rhs->frequency;
+    }
+};
+
+class HuffmanEncoder {
+public:
+    void buildTree(const vector<int>& data) {
+        map<int, int> freqMap;
+        for (int symbol : data) {
+            freqMap[symbol]++;
+        }
+
+        priority_queue<HuffmanNode*, vector<HuffmanNode*>, CompareNode> pq;
+        for (const auto& pair : freqMap) {
+            pq.push(new HuffmanNode(pair.first, pair.second));
+        }
+
+        while (pq.size() > 1) {
+            auto left = unique_ptr<HuffmanNode>(pq.top());
+            pq.pop();
+            auto right = unique_ptr<HuffmanNode>(pq.top());
+            pq.pop();
+
+            auto newNode = new HuffmanNode(-1, left->frequency + right->frequency);
+            newNode->left = move(left);
+            newNode->right = move(right);
+            pq.push(newNode);
+        }
+
+        if (!pq.empty()) {
+            root.reset(pq.top());
+            generateCodes(root.get(), "");
+        }
+    }
+
+    vector<string> encode(const vector<int>& data) {
+        vector<string> encodedData;
+        for (int symbol : data) {
+            encodedData.push_back(codeMap.at(symbol));
+        }
+        return encodedData;
+    }
+
+    vector<int> decode(const vector<string>& encodedData) {
+        vector<int> decodedData;
+        for (const string& code : encodedData) {
+            HuffmanNode* current = root.get();
+            for (char bit : code) {
+                current = (bit == '0') ? current->left.get() : current->right.get();
+                if (current == nullptr) {
+                    throw runtime_error("Invalid Huffman code");
+                }
+            }
+            decodedData.push_back(current->symbol);
+        }
+        return decodedData;
+    }
+
+private:
+    unique_ptr<HuffmanNode> root;
+    map<int, string> codeMap;
+
+    void generateCodes(HuffmanNode* node, const string& code) {
+        if (!node) return;
+        if (!node->left && !node->right) {
+            codeMap[node->symbol] = code;
+            return;
+        }
+        generateCodes(node->left.get(), code + "0");
+        generateCodes(node->right.get(), code + "1");
+    }
+};
+
+// --- Compression ---
+void saveCompressedData(const vector<vector<pair<int, int>>>& allRleData,
+                      const vector<string>& huffmanEncodedData,
+                      const AudioMetadata& metadata,
+                      const string& filename) {
+    ofstream outFile(filename, ios::binary);
+    if (!outFile) throw runtime_error("Failed to create output file");
+
+    // Save metadata
+    outFile.write(reinterpret_cast<const char*>(&metadata.samplerate), sizeof(int));
+    outFile.write(reinterpret_cast<const char*>(&metadata.channels), sizeof(int));
+    outFile.write(reinterpret_cast<const char*>(&metadata.frames), sizeof(sf_count_t));
+
+    // Save RLE data
+    size_t numChunks = allRleData.size();
+    outFile.write(reinterpret_cast<const char*>(&numChunks), sizeof(size_t));
+    for (const auto& rleData : allRleData) {
+        size_t numPairs = rleData.size();
+        outFile.write(reinterpret_cast<const char*>(&numPairs), sizeof(size_t));
+        for (const auto& pair : rleData) {
+            outFile.write(reinterpret_cast<const char*>(&pair.first), sizeof(int));
+            outFile.write(reinterpret_cast<const char*>(&pair.second), sizeof(int));
+        }
+    }
+
+    // Save Huffman data
+    size_t numEncodedSymbols = huffmanEncodedData.size();
+    outFile.write(reinterpret_cast<const char*>(&numEncodedSymbols), sizeof(size_t));
+    for (const string& code : huffmanEncodedData) {
+        uint8_t length = code.size();
+        outFile.write(reinterpret_cast<const char*>(&length), sizeof(uint8_t));
+        outFile.write(code.c_str(), length);
+    }
+}
+
+void compressAudio(const string& filename) {
+    SF_INFO sfinfo = {};
+    SNDFILE* file = sf_open(filename.c_str(), SFM_READ, &sfinfo);
+    if (!file) throw runtime_error("Error opening file: " + filename);
+
+    cout << "Original audio: " << sfinfo.frames << " frames @ " 
+         << sfinfo.samplerate << " Hz (" 
+         << double(sfinfo.frames)/sfinfo.samplerate << " sec)" << endl;
+
+    vector<int16_t> audioSamples(sfinfo.frames * sfinfo.channels);
+    sf_read_short(file, audioSamples.data(), audioSamples.size());
+    sf_close(file);
+
+    vector<vector<pair<int, int>>> allRleData;
+    auto dctMatrix = precomputeDCTMatrix(CHUNK_SIZE);
+
+    for (size_t i = 0; i < audioSamples.size(); i += CHUNK_SIZE) {
+        size_t chunkSize = min(CHUNK_SIZE, static_cast<int>(audioSamples.size() - i));
+        vector<double> dctTransformed = applyDCT(audioSamples, i, chunkSize, dctMatrix);
+        
+        vector<int> quantized(chunkSize);
+        transform(dctTransformed.begin(), dctTransformed.end(), quantized.begin(),
+                 [](double val) { return static_cast<int>(round(val / QUANTIZATION_FACTOR)); });
+        
+        allRleData.push_back(runLengthEncode(quantized));
+    }
+
+    vector<int> allSymbols;
+    for (const auto& chunk : allRleData) {
+        for (const auto& pair : chunk) {
+            allSymbols.push_back(pair.first);
+        }
+    }
+
+    HuffmanEncoder huffman;
+    huffman.buildTree(allSymbols);
+    vector<string> huffmanEncodedData = huffman.encode(allSymbols);
+
+    AudioMetadata metadata;
+    metadata.samplerate = sfinfo.samplerate;
+    metadata.channels = sfinfo.channels;
+    metadata.frames = sfinfo.frames;
+
+    saveCompressedData(allRleData, huffmanEncodedData, metadata, "compressed.bin");
+    cout << "Compression complete. Output: compressed.bin" << endl;
+}
+
+// --- Decompression ---
+void decompressAudio(const string& outputFile) {
+    ifstream inFile("compressed.bin", ios::binary);
+    if (!inFile) throw runtime_error("Error opening compressed file");
+
+    // Read metadata
+    AudioMetadata metadata;
+    inFile.read(reinterpret_cast<char*>(&metadata.samplerate), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&metadata.channels), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&metadata.frames), sizeof(sf_count_t));
+
+    // Read RLE data
+    size_t numChunks;
+    inFile.read(reinterpret_cast<char*>(&numChunks), sizeof(size_t));
+    vector<vector<pair<int, int>>> allRleData(numChunks);
+
+    for (auto& rleData : allRleData) {
+        size_t numPairs;
+        inFile.read(reinterpret_cast<char*>(&numPairs), sizeof(size_t));
+        rleData.resize(numPairs);
+        for (auto& pair : rleData) {
+            inFile.read(reinterpret_cast<char*>(&pair.first), sizeof(int));
+            inFile.read(reinterpret_cast<char*>(&pair.second), sizeof(int));
+        }
+    }
+
+    // Read Huffman data
+    size_t numEncodedSymbols;
+    inFile.read(reinterpret_cast<char*>(&numEncodedSymbols), sizeof(size_t));
+    vector<string> huffmanEncodedData(numEncodedSymbols);
+    
+    for (string& code : huffmanEncodedData) {
+        uint8_t length;
+        inFile.read(reinterpret_cast<char*>(&length), sizeof(uint8_t));
+        code.resize(length);
+        inFile.read(&code[0], length);
+    }
+    inFile.close();
+
+    // Decode
+    HuffmanEncoder huffman;
+    vector<int> allSymbols;
+    for (const auto& chunk : allRleData) {
+        for (const auto& pair : chunk) {
+            allSymbols.push_back(pair.first);
+        }
+    }
+    huffman.buildTree(allSymbols);
+    
+    vector<int> decodedSymbols = huffman.decode(huffmanEncodedData);
+
+    // Reconstruct
+    vector<vector<int>> allDecodedData;
+    size_t symbolIndex = 0;
+    for (const auto& rleData : allRleData) {
+        vector<int> chunkData;
+        for (const auto& pair : rleData) {
+            if (symbolIndex >= decodedSymbols.size()) {
+                throw runtime_error("Not enough decoded symbols");
+            }
+            int value = decodedSymbols[symbolIndex++];
+            chunkData.insert(chunkData.end(), pair.second, value);
+        }
+        allDecodedData.push_back(chunkData);
+    }
+
+    // Inverse DCT
+    vector<int16_t> audioSamples;
+    auto dctMatrix = precomputeDCTMatrix(CHUNK_SIZE);
+    for (const auto& chunk : allDecodedData) {
+        vector<double> dctRestored(chunk.size());
+        transform(chunk.begin(), chunk.end(), dctRestored.begin(),
+                 [](int val) { return val * QUANTIZATION_FACTOR; });
+        
+        vector<int16_t> signal = inverseDCT(dctRestored, dctMatrix);
+        audioSamples.insert(audioSamples.end(), signal.begin(), signal.end());
+    }
+
+    // Trim to original length if needed
+    size_t expectedSamples = metadata.frames * metadata.channels;
+    if (audioSamples.size() > expectedSamples) {
+        audioSamples.resize(expectedSamples);
+    }
+
+    cout << "Decompressed audio: " << audioSamples.size()/metadata.channels << " frames @ " 
+         << metadata.samplerate << " Hz (" 
+         << double(audioSamples.size())/metadata.samplerate/metadata.channels << " sec)" << endl;
+
+    // Save
+    SF_INFO sfinfo = {};
+    sfinfo.samplerate = metadata.samplerate;
+    sfinfo.channels = metadata.channels;
+    sfinfo.frames = audioSamples.size() / metadata.channels;
+    sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+
+    SNDFILE* outFile = sf_open(outputFile.c_str(), SFM_WRITE, &sfinfo);
+    if (!outFile) throw runtime_error("Error opening output file");
+    sf_write_short(outFile, audioSamples.data(), audioSamples.size());
+    sf_close(outFile);
+
+    cout << "Decompression complete. Output: " << outputFile << endl;
+}
+
+// --- Main ---
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <input_file> <output_file>" << std::endl;
+    try {
+        if (argc > 1 && strcmp(argv[1], "-d") == 0) {
+            decompressAudio("output.wav");
+        } else {
+            if (argc < 2) {
+                cerr << "Usage: " << argv[0] << " <input.wav> (for compression)" << endl;
+                cerr << "       " << argv[0] << " -d (for decompression)" << endl;
+                return 1;
+            }
+            compressAudio(argv[1]);
+        }
+    } catch (const exception& e) {
+        cerr << "Error: " << e.what() << endl;
         return 1;
     }
-
-    std::string inputFile = argv[1];
-    std::string outputFile = argv[2];
-
-    std::cout << "Starting audio compression..." << std::endl;
-    std::cout << "Input File: " << inputFile << std::endl;
-    std::cout << "Output File: " << outputFile << std::endl;
-
-    bool success = AudioCompressor::AdaptiveHuffmanCoder::compressAudioFile(inputFile, outputFile);
-
-    if (success) {
-        std::cout << "Compression successful. Output file: " << outputFile << std::endl;
-        return 0;
-    } else {
-        std::cerr << "Compression failed." << std::endl;
-        return 1;
-    }
+    return 0;
 }
