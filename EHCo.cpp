@@ -13,7 +13,7 @@
 using namespace std;
 
 const int CHUNK_SIZE = 1024;
-const int QUANTIZATION_FACTOR = 100;
+const int QUANTIZATION_FACTOR = 1;
 
 // Audio metadata storage
 struct AudioMetadata {
