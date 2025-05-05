@@ -2,26 +2,27 @@
 #include <vector>
 #include <map>
 #include <queue>
+#define _USE_MATH_DEFINES
 #include <cmath>
 #include <fstream>
 #include <cstring>
 #include <algorithm>
 #include <sndfile.h>
-#include <functional>
-#include <thread>
-#include <future>
+#include <bitset>
 
 using namespace std;
 
-const int CHUNK_SIZE = 4096;
-const int QUANTIZATION_FACTOR = 256;
-const double QUANTIZATION_THRESHOLD = 0.7;
+const int CHUNK_SIZE = 4096;  // Reduced chunk size for better memory handling
+const int QUANTIZATION_FACTOR = 64;
+const double QUANTIZATION_THRESHOLD = 5.0;
 
+// Audio metadata storage
 struct AudioMetadata {
     int samplerate, channels;
     sf_count_t frames;
 };
 
+// --- DCT Functions ---
 vector<vector<double>> precomputeDCTMatrix(int N) {
     vector<vector<double>> dctMatrix(N, vector<double>(N));
     double sqrtN = sqrt(1.0/N);
@@ -62,162 +63,193 @@ vector<int16_t> inverseDCT(const vector<double>& transformed, const vector<vecto
     return signal;
 }
 
-vector<pair<int16_t, uint16_t>> runLengthEncode(const vector<int16_t>& data) {
-    vector<pair<int16_t, uint16_t>> encoded;
+// --- Run-Length Encoding ---
+vector<pair<int, int>> runLengthEncode(const vector<int>& data) {
+    vector<pair<int, int>> encoded;
     if (data.empty()) return encoded;
     
-    int16_t current = data[0];
-    uint16_t count = 1;
-    
-    for (size_t i = 1; i < data.size(); ++i) {
-        if (data[i] == current && count < numeric_limits<uint16_t>::max()) {
-            ++count;
+    int zero_run = 0;
+    for (int16_t val : data) {
+        if (val == 0) {
+            zero_run++;
         } else {
-            encoded.emplace_back(current, count);
-            current = data[i];
-            count = 1;
+            if (zero_run > 0) {
+                encoded.emplace_back(0, zero_run);
+                zero_run = 0;
+            }
+            encoded.emplace_back(val, 1);
         }
     }
-    encoded.emplace_back(current, count);
+    if (zero_run > 0) {
+        encoded.emplace_back(0, zero_run);
+    }
+    
     return encoded;
 }
 
 vector<int16_t> runLengthDecode(const vector<pair<int16_t, uint16_t>>& encoded) {
     vector<int16_t> decoded;
-    for (const auto& p : encoded) {
-        decoded.insert(decoded.end(), p.second, p.first);
+    for (const auto& pair : encoded) {
+        decoded.insert(decoded.end(), pair.second, pair.first);
     }
     return decoded;
 }
 
+// --- Huffman Encoding ---
 struct HuffmanNode {
     int16_t symbol;
-    int weight, order;
-    HuffmanNode *parent, *left, *right;
+    int frequency;
+    unique_ptr<HuffmanNode> left;
+    unique_ptr<HuffmanNode> right;
 
-    HuffmanNode(int16_t sym, int wt, int ord) 
-        : symbol(sym), weight(wt), order(ord), parent(nullptr), left(nullptr), right(nullptr) {}
+    HuffmanNode(int16_t sym, int freq) : symbol(sym), frequency(freq) {}
 };
 
-class AdaptiveHuffman {
-    map<int16_t, HuffmanNode*> symbolMap;
-    HuffmanNode* root;
-    int nextOrder;
-    const int16_t NYT_SYMBOL = numeric_limits<int16_t>::max();
+struct CompareNode {
+    bool operator()(const HuffmanNode* lhs, const HuffmanNode* rhs) const {
+        return lhs->frequency > rhs->frequency;
+    }
+};
 
-    vector<bool> getCode(HuffmanNode* node) {
-        vector<bool> code;
-        while (node->parent) {
-            code.push_back(node == node->parent->right);
-            node = node->parent;
+class HuffmanEncoder {
+public:
+    void buildTree(const vector<int16_t>& data) {
+        map<int16_t, int> freqMap;
+        for (int16_t symbol : data) {
+            freqMap[symbol]++;
         }
-        reverse(code.begin(), code.end());
-        return code;
+
+        priority_queue<HuffmanNode*, vector<HuffmanNode*>, CompareNode> pq;
+        for (const auto& pair : freqMap) {
+            pq.push(new HuffmanNode(pair.first, pair.second));
+        }
+
+        while (pq.size() > 1) {
+            auto left = unique_ptr<HuffmanNode>(pq.top());
+            pq.pop();
+            auto right = unique_ptr<HuffmanNode>(pq.top());
+            pq.pop();
+
+            auto newNode = new HuffmanNode(0, left->frequency + right->frequency);
+            newNode->left = move(left);
+            newNode->right = move(right);
+            pq.push(newNode);
+        }
+
+        if (!pq.empty()) {
+            root.reset(pq.top());
+            generateCodes(root.get(), "");
+        }
     }
 
-    void swapNodes(HuffmanNode* a, HuffmanNode* b) {
-        if (!a->parent || !b->parent) return;
-        
-        if (a->parent->left == a) a->parent->left = b;
-        else a->parent->right = b;
-        
-        if (b->parent->left == b) b->parent->left = a;
-        else b->parent->right = a;
-        
-        swap(a->parent, b->parent);
-        swap(a->order, b->order);
+    vector<bool> encode(const vector<int16_t>& data) {
+        vector<bool> encodedData;
+        for (int16_t symbol : data) {
+            const string& code = codeMap.at(symbol);
+            for (char bit : code) {
+                encodedData.push_back(bit == '1');
+            }
+        }
+        return encodedData;
     }
 
-    HuffmanNode* findNodeToSwap(HuffmanNode* node) {
-        HuffmanNode* candidate = nullptr;
-        queue<HuffmanNode*> q;
-        q.push(root);
+    vector<int16_t> decode(const vector<bool>& encodedData) {
+        vector<int16_t> decodedData;
+        HuffmanNode* current = root.get();
         
-        while (!q.empty()) {
-            HuffmanNode* current = q.front();
-            q.pop();
+        for (bool bit : encodedData) {
+            current = bit ? current->right.get() : current->left.get();
+            if (!current->left && !current->right) {
+                decodedData.push_back(current->symbol);
+                current = root.get();
+            }
+        }
+        
+        return decodedData;
+    }
+
+    void saveCodebook(ofstream& outFile) {
+        size_t codebookSize = codeMap.size();
+        outFile.write(reinterpret_cast<const char*>(&codebookSize), sizeof(size_t));
+        
+        for (const auto& pair : codeMap) {
+            outFile.write(reinterpret_cast<const char*>(&pair.first), sizeof(int16_t));
+            uint8_t codeLength = pair.second.size();
+            outFile.write(reinterpret_cast<const char*>(&codeLength), sizeof(uint8_t));
             
-            if (current != node && current->weight == node->weight && 
-                current->order > node->order) {
-                if (!candidate || current->order > candidate->order) {
-                    candidate = current;
+            uint8_t buffer = 0;
+            int bitPos = 7;
+            for (char bit : pair.second) {
+                if (bit == '1') {
+                    buffer |= (1 << bitPos);
+                }
+                bitPos--;
+                if (bitPos < 0) {
+                    outFile.write(reinterpret_cast<const char*>(&buffer), sizeof(uint8_t));
+                    buffer = 0;
+                    bitPos = 7;
+                }
+            }
+            if (bitPos != 7) {
+                outFile.write(reinterpret_cast<const char*>(&buffer), sizeof(uint8_t));
+            }
+        }
+    }
+
+    void loadCodebook(ifstream& inFile) {
+        size_t codebookSize;
+        inFile.read(reinterpret_cast<char*>(&codebookSize), sizeof(size_t));
+        
+        codeMap.clear();
+        for (size_t i = 0; i < codebookSize; i++) {
+            int16_t symbol;
+            inFile.read(reinterpret_cast<char*>(&symbol), sizeof(int16_t));
+            uint8_t codeLength;
+            inFile.read(reinterpret_cast<char*>(&codeLength), sizeof(uint8_t));
+            
+            string code;
+            uint8_t buffer;
+            int bitsRead = 0;
+            
+            while (bitsRead < codeLength) {
+                inFile.read(reinterpret_cast<char*>(&buffer), sizeof(uint8_t));
+                for (int j = 7; j >= 0 && bitsRead < codeLength; j--, bitsRead++) {
+                    code += (buffer & (1 << j)) ? '1' : '0';
                 }
             }
             
-            if (current->left) q.push(current->left);
-            if (current->right) q.push(current->right);
-        }
-        return candidate;
-    }
-
-    void updateTree(int16_t symbol) {
-        HuffmanNode* node;
-        
-        if (symbolMap.find(symbol) != symbolMap.end()) {
-            node = symbolMap[symbol];
-        } else {
-            HuffmanNode* nytNode = symbolMap[NYT_SYMBOL];
-            HuffmanNode* internal = new HuffmanNode(0, 0, nextOrder--);
-            internal->parent = nytNode->parent;
-            
-            if (nytNode->parent) {
-                (nytNode->parent->left == nytNode ? nytNode->parent->left : nytNode->parent->right) = internal;
-            } else {
-                root = internal;
-            }
-            
-            HuffmanNode* newNYT = new HuffmanNode(NYT_SYMBOL, 0, nextOrder--);
-            newNYT->parent = internal;
-            internal->left = newNYT;
-            symbolMap[NYT_SYMBOL] = newNYT;
-            
-            node = new HuffmanNode(symbol, 0, nextOrder--);
-            node->parent = internal;
-            internal->right = node;
-            symbolMap[symbol] = node;
+            codeMap[symbol] = code;
         }
         
-        while (node) {
-            HuffmanNode* toSwap = findNodeToSwap(node);
-            if (toSwap && node != toSwap && node->parent != toSwap) {
-                swapNodes(node, toSwap);
+        root = make_unique<HuffmanNode>(0, 0);
+        for (const auto& pair : codeMap) {
+            HuffmanNode* current = root.get();
+            for (char bit : pair.second) {
+                if (bit == '0') {
+                    if (!current->left) {
+                        current->left = make_unique<HuffmanNode>(0, 0);
+                    }
+                    current = current->left.get();
+                } else {
+                    if (!current->right) {
+                        current->right = make_unique<HuffmanNode>(0, 0);
+                    }
+                    current = current->right.get();
+                }
             }
-            node->weight++;
-            node = node->parent;
+            current->symbol = pair.first;
         }
     }
 
-public:
-    AdaptiveHuffman() : nextOrder(511) {
-        root = new HuffmanNode(NYT_SYMBOL, 0, 512);
-        symbolMap[NYT_SYMBOL] = root;
-    }
+private:
+    unique_ptr<HuffmanNode> root;
+    map<int16_t, string> codeMap;
 
-    ~AdaptiveHuffman() {
-        function<void(HuffmanNode*)> freeTree = [&](HuffmanNode* node) {
-            if (!node) return;
-            freeTree(node->left);
-            freeTree(node->right);
-            delete node;
-        };
-        freeTree(root);
-    }
-
-    vector<bool> encode(int16_t symbol) {
-        vector<bool> code;
-        if (symbolMap.find(symbol) != symbolMap.end()) {
-            code = getCode(symbolMap[symbol]);
-        } else {
-            vector<bool> nytCode = getCode(symbolMap[NYT_SYMBOL]);
-            code.insert(code.end(), nytCode.begin(), nytCode.end());
-            
-            uint16_t absSym = abs(symbol);
-            int bitWidth = 0;
-            while ((1 << bitWidth) <= absSym) bitWidth++;
-            
-            for (int i = 3; i >= 0; i--) code.push_back((bitWidth >> i) & 1);
-            code.push_back(symbol < 0);
-            for (int i = bitWidth - 1; i >= 0; i--) code.push_back((absSym >> i) & 1);
+    void generateCodes(HuffmanNode* node, const string& code) {
+        if (!node) return;
+        if (!node->left && !node->right) {
+            codeMap[node->symbol] = code;
+            return;
         }
         updateTree(symbol);
         return code;
@@ -247,18 +279,25 @@ public:
 
 vector<uint8_t> packBits(const vector<bool>& bits) {
     vector<uint8_t> packed;
-    uint8_t byte = 0;
+    uint8_t buffer = 0;
     int bitPos = 7;
     
     for (bool bit : bits) {
-        if (bit) byte |= (1 << bitPos);
-        if (--bitPos < 0) {
-            packed.push_back(byte);
-            byte = 0;
+        if (bit) {
+            buffer |= (1 << bitPos);
+        }
+        bitPos--;
+        if (bitPos < 0) {
+            packed.push_back(buffer);
+            buffer = 0;
             bitPos = 7;
         }
     }
-    if (bitPos != 7) packed.push_back(byte);
+    
+    if (bitPos != 7) {
+        packed.push_back(buffer);
+    }
+    
     return packed;
 }
 
@@ -271,31 +310,40 @@ vector<bool> unpackBits(const vector<uint8_t>& packed, size_t totalBits) {
             bits.push_back((byte >> i) & 1);
         }
     }
+    
     return bits;
 }
 
-void saveCompressedData(const vector<vector<pair<int16_t, uint16_t>>>& rleData,
+void saveCompressedData(const vector<vector<pair<int16_t, uint16_t>>>& allRleData,
                       const vector<bool>& huffmanBits,
                       const AudioMetadata& metadata,
                       const string& filename) {
-    ofstream out(filename, ios::binary);
-    if (!out) throw runtime_error("Failed to create file");
-    
-    out.write(reinterpret_cast<const char*>(&metadata), sizeof(metadata));
-    uint32_t numChunks = rleData.size();
-    out.write(reinterpret_cast<const char*>(&numChunks), sizeof(numChunks));
-    
-    for (const auto& chunk : rleData) {
-        uint32_t numPairs = chunk.size();
-        out.write(reinterpret_cast<const char*>(&numPairs), sizeof(numPairs));
-        out.write(reinterpret_cast<const char*>(chunk.data()), numPairs * sizeof(pair<int16_t, uint16_t>));
+    ofstream outFile(filename, ios::binary);
+    if (!outFile) throw runtime_error("Failed to create output file");
+
+    outFile.write(reinterpret_cast<const char*>(&metadata.samplerate), sizeof(int));
+    outFile.write(reinterpret_cast<const char*>(&metadata.channels), sizeof(int));
+    outFile.write(reinterpret_cast<const char*>(&metadata.frames), sizeof(sf_count_t));
+
+    size_t numChunks = allRleData.size();
+    outFile.write(reinterpret_cast<const char*>(&numChunks), sizeof(size_t));
+    for (const auto& rleData : allRleData) {
+        size_t numPairs = rleData.size();
+        outFile.write(reinterpret_cast<const char*>(&numPairs), sizeof(size_t));
+        for (const auto& pair : rleData) {
+            outFile.write(reinterpret_cast<const char*>(&pair.first), sizeof(int16_t));
+            outFile.write(reinterpret_cast<const char*>(&pair.second), sizeof(uint16_t));
+        }
     }
-    
-    auto packed = packBits(huffmanBits);
-    uint32_t numBits = huffmanBits.size(), numBytes = packed.size();
-    out.write(reinterpret_cast<const char*>(&numBits), sizeof(numBits));
-    out.write(reinterpret_cast<const char*>(&numBytes), sizeof(numBytes));
-    out.write(reinterpret_cast<const char*>(packed.data()), numBytes);
+
+    huffman.saveCodebook(outFile);
+
+    vector<uint8_t> packedBits = packBits(huffmanBits);
+    size_t numBits = huffmanBits.size();
+    size_t numBytes = packedBits.size();
+    outFile.write(reinterpret_cast<const char*>(&numBits), sizeof(size_t));
+    outFile.write(reinterpret_cast<const char*>(&numBytes), sizeof(size_t));
+    outFile.write(reinterpret_cast<const char*>(packedBits.data()), numBytes);
 }
 
 void compressAudio(const string& filename) {
@@ -307,155 +355,129 @@ void compressAudio(const string& filename) {
     sf_read_short(file, samples.data(), samples.size());
     sf_close(file);
 
-    size_t originalSize = samples.size() * sizeof(int16_t);
-    cout << "Original: " << originalSize/1024.0 << " KB\n";
-
+    vector<vector<pair<int16_t, uint16_t>>> allRleData;
     auto dctMatrix = precomputeDCTMatrix(CHUNK_SIZE);
-    size_t numChunks = (samples.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    vector<vector<pair<int16_t, uint16_t>>> allRleData(numChunks);
-    vector<vector<int16_t>> allSymbolsChunks(numChunks);
 
-    unsigned int maxThreads = thread::hardware_concurrency();
-    if (maxThreads == 0) maxThreads = 4;
-    vector<future<void>> futures;
-
-    for (size_t chunkIdx = 0; chunkIdx < numChunks; ++chunkIdx) {
-        if (futures.size() >= maxThreads) {
-            futures.front().get();
-            futures.erase(futures.begin());
-        }
-        futures.emplace_back(async(launch::async, [&, chunkIdx]() {
-            size_t i = chunkIdx * CHUNK_SIZE;
-            size_t chunkSize = min(static_cast<size_t>(CHUNK_SIZE), samples.size() - i);
-            auto t = applyDCT(samples, i, chunkSize, dctMatrix);
-            vector<int16_t> quantized(chunkSize);
-            for (size_t j = 0; j < chunkSize; j++) {
-                double scale = (j < CHUNK_SIZE/8) ? 1.0 : 
-                             ((j < CHUNK_SIZE/4) ? 2.0 : 
-                             ((j < CHUNK_SIZE/2) ? 4.0 : 8.0));
-                double val = t[j] / (QUANTIZATION_FACTOR * scale);
-                if (fabs(val) < QUANTIZATION_THRESHOLD * scale) val = 0;
-                quantized[j] = static_cast<int16_t>(round(val));
+    for (size_t i = 0; i < audioSamples.size(); i += CHUNK_SIZE) {
+        size_t chunkSize = min(CHUNK_SIZE, static_cast<int>(audioSamples.size() - i));
+        vector<double> dctTransformed = applyDCT(audioSamples, i, chunkSize, dctMatrix);
+        
+        vector<int16_t> quantized(chunkSize);
+        for (size_t j = 0; j < chunkSize; j++) {
+            double scale = (j < CHUNK_SIZE/4) ? 1.0 : (2.0 + (j - CHUNK_SIZE/4)/(CHUNK_SIZE/4));
+            double val = dctTransformed[j] / (QUANTIZATION_FACTOR * scale);
+            
+            if (fabs(val) < QUANTIZATION_THRESHOLD * scale) {
+                val = 0;
             }
-            auto rle = runLengthEncode(quantized);
-            allRleData[chunkIdx] = rle;
-            allSymbolsChunks[chunkIdx].reserve(rle.size());
-            for (const auto& p : rle) allSymbolsChunks[chunkIdx].push_back(p.first);
-        }));
+            quantized[j] = static_cast<int16_t>(round(val));
+        }
+        
+        allRleData.push_back(runLengthEncode(quantized));
     }
-    for (auto& fut : futures) fut.get();
 
-    // Flatten allSymbolsChunks into allSymbols
     vector<int16_t> allSymbols;
-    size_t totalSymbols = 0;
-    for (const auto& v : allSymbolsChunks) totalSymbols += v.size();
-    allSymbols.reserve(totalSymbols);
-    for (const auto& v : allSymbolsChunks) allSymbols.insert(allSymbols.end(), v.begin(), v.end());
-
-    AdaptiveHuffman huffman;
-    vector<bool> bits;
-    bits.reserve(allSymbols.size() * 16); // Reserve a rough upper bound
-    for (int16_t sym : allSymbols) {
-        auto code = huffman.encode(sym);
-        bits.insert(bits.end(), code.begin(), code.end());
+    for (const auto& chunk : allRleData) {
+        for (const auto& pair : chunk) {
+            allSymbols.push_back(pair.first);
+        }
     }
 
-    AudioMetadata metadata = {sfinfo.samplerate, sfinfo.channels, sfinfo.frames};
-    saveCompressedData(allRleData, bits, metadata, "compressed.bin");
+    HuffmanEncoder huffman;
+    huffman.buildTree(allSymbols);
+    vector<bool> huffmanBits = huffman.encode(allSymbols);
 
-    ifstream in("compressed.bin", ios::binary | ios::ate);
-    size_t compressedSize = in.tellg();
-    cout << "Compressed: " << compressedSize/1024.0 << " KB (" 
-         << (100.0 * compressedSize / originalSize) << "%)\n";
+    AudioMetadata metadata;
+    metadata.samplerate = sfinfo.samplerate;
+    metadata.channels = sfinfo.channels;
+    metadata.frames = sfinfo.frames;
+
+    saveCompressedData(allRleData, huffmanBits, metadata, huffman, "compressed.bin");
+    
+    ifstream inFile("compressed.bin", ios::binary | ios::ate);
+    size_t compressedSize = inFile.tellg();
+    inFile.close();
+    
+    double ratio = (double)compressedSize / (audioSamples.size() * sizeof(int16_t));
+    cout << "Compression complete. Output: compressed.bin (" 
+         << compressedSize / (1024.0 * 1024.0) << " MB)" << endl;
+    cout << "Compression ratio: " << (ratio * 100) << "% of original size" << endl;
 }
 
 void decompressAudio(const string& outputFile) {
     ifstream in("compressed.bin", ios::binary);
     if (!in) throw runtime_error("Error opening file");
 
+    // Read metadata
     AudioMetadata metadata;
-    in.read(reinterpret_cast<char*>(&metadata), sizeof(metadata));
+    inFile.read(reinterpret_cast<char*>(&metadata.samplerate), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&metadata.channels), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&metadata.frames), sizeof(sf_count_t));
 
-    uint32_t numChunks;
-    in.read(reinterpret_cast<char*>(&numChunks), sizeof(numChunks));
-    vector<vector<pair<int16_t, uint16_t>>> rleData(numChunks);
+    size_t numChunks;
+    inFile.read(reinterpret_cast<char*>(&numChunks), sizeof(size_t));
+    vector<vector<pair<int16_t, uint16_t>>> allRleData(numChunks);
 
-    for (auto& chunk : rleData) {
-        uint32_t numPairs;
-        in.read(reinterpret_cast<char*>(&numPairs), sizeof(numPairs));
-        chunk.resize(numPairs);
-        in.read(reinterpret_cast<char*>(chunk.data()), numPairs * sizeof(pair<int16_t, uint16_t>));
-    }
-
-    uint32_t numBits, numBytes;
-    in.read(reinterpret_cast<char*>(&numBits), sizeof(numBits));
-    in.read(reinterpret_cast<char*>(&numBytes), sizeof(numBytes));
-    vector<uint8_t> packed(numBytes);
-    in.read(reinterpret_cast<char*>(packed.data()), numBytes);
-
-    auto bits = unpackBits(packed, numBits);
-    AdaptiveHuffman huffman;
-    vector<int16_t> symbols;
-    symbols.reserve(numBits / 8); // Reserve a rough estimate
-    size_t pos = 0;
-
-    while (pos < bits.size()) {
-        try {
-            symbols.push_back(huffman.decode(bits, pos));
-        } catch (...) { break; }
-    }
-
-    size_t symIdx = 0;
-    auto dctMatrix = precomputeDCTMatrix(CHUNK_SIZE);
-    vector<vector<int16_t>> outputChunks(numChunks);
-    vector<future<void>> futures;
-    unsigned int maxThreads = thread::hardware_concurrency();
-    if (maxThreads == 0) maxThreads = 4;
-
-    // Precompute chunk start indices for symbols vector (by RLE pairs, not by total samples)
-    vector<size_t> chunkSymbolStart(numChunks+1, 0);
-    size_t tempSymIdx = 0;
-    for (size_t ci = 0; ci < numChunks; ++ci) {
-        chunkSymbolStart[ci] = tempSymIdx;
-        tempSymIdx += rleData[ci].size();
-    }
-    chunkSymbolStart[numChunks] = tempSymIdx;
-
-    for (size_t chunkIdx = 0; chunkIdx < numChunks; ++chunkIdx) {
-        if (futures.size() >= maxThreads) {
-            futures.front().get();
-            futures.erase(futures.begin());
+    for (auto& rleData : allRleData) {
+        size_t numPairs;
+        inFile.read(reinterpret_cast<char*>(&numPairs), sizeof(size_t));
+        rleData.resize(numPairs);
+        for (auto& pair : rleData) {
+            inFile.read(reinterpret_cast<char*>(&pair.first), sizeof(int16_t));
+            inFile.read(reinterpret_cast<char*>(&pair.second), sizeof(uint16_t));
         }
-        futures.emplace_back(async(launch::async, [&, chunkIdx]() {
-            vector<int16_t> quantized;
-            quantized.reserve(CHUNK_SIZE);
-            size_t localSymIdx = chunkSymbolStart[chunkIdx];
-            for (const auto& p : rleData[chunkIdx]) {
-                if (localSymIdx >= symbols.size()) throw runtime_error("Symbol mismatch");
-                quantized.insert(quantized.end(), p.second, symbols[localSymIdx]);
-                localSymIdx++;
-            }
-            vector<double> restored(quantized.size());
-            for (size_t i = 0; i < quantized.size(); i++) {
-                double scale = (i < CHUNK_SIZE/8) ? 1.0 : 
-                             ((i < CHUNK_SIZE/4) ? 2.0 : 
-                             ((i < CHUNK_SIZE/2) ? 4.0 : 8.0));
-                restored[i] = quantized[i] * QUANTIZATION_FACTOR * scale;
-            }
-            outputChunks[chunkIdx] = inverseDCT(restored, dctMatrix);
-        }));
     }
-    for (auto& fut : futures) fut.get();
 
-    // Flatten outputChunks into output
-    vector<int16_t> output;
-    size_t totalOutput = 0;
-    for (const auto& v : outputChunks) totalOutput += v.size();
-    output.reserve(totalOutput);
-    for (const auto& v : outputChunks) output.insert(output.end(), v.begin(), v.end());
+    HuffmanEncoder huffman;
+    huffman.loadCodebook(inFile);
 
-    output.resize(metadata.frames * metadata.channels);
+    size_t numBits, numBytes;
+    inFile.read(reinterpret_cast<char*>(&numBits), sizeof(size_t));
+    inFile.read(reinterpret_cast<char*>(&numBytes), sizeof(size_t));
+    vector<uint8_t> packedBits(numBytes);
+    inFile.read(reinterpret_cast<char*>(packedBits.data()), numBytes);
+    inFile.close();
 
+    vector<bool> huffmanBits = unpackBits(packedBits, numBits);
+    vector<int16_t> decodedSymbols = huffman.decode(huffmanBits);
+
+    size_t symbolIndex = 0;
+    vector<vector<int16_t>> allDecodedData;
+    for (const auto& rleData : allRleData) {
+        vector<int16_t> chunkData;
+        for (const auto& pair : rleData) {
+            if (symbolIndex >= decodedSymbols.size()) {
+                throw runtime_error("Not enough decoded symbols");
+            }
+            int16_t value = decodedSymbols[symbolIndex++];
+            chunkData.insert(chunkData.end(), pair.second, value);
+        }
+        allDecodedData.push_back(chunkData);
+    }
+
+    vector<int16_t> audioSamples;
+    auto dctMatrix = precomputeDCTMatrix(CHUNK_SIZE);
+    for (const auto& chunk : allDecodedData) {
+        vector<double> dctRestored(chunk.size());
+        for (size_t i = 0; i < chunk.size(); i++) {
+            double scale = (i < CHUNK_SIZE/4) ? 1.0 : (2.0 + (i - CHUNK_SIZE/4)/(CHUNK_SIZE/4));
+            dctRestored[i] = chunk[i] * QUANTIZATION_FACTOR * scale;
+        }
+        
+        vector<int16_t> signal = inverseDCT(dctRestored, dctMatrix);
+        audioSamples.insert(audioSamples.end(), signal.begin(), signal.end());
+    }
+
+    size_t expectedSamples = metadata.frames * metadata.channels;
+    if (audioSamples.size() > expectedSamples) {
+        audioSamples.resize(expectedSamples);
+    }
+
+    cout << "Decompressed audio: " << audioSamples.size()/metadata.channels << " frames @ " 
+         << metadata.samplerate << " Hz (" 
+         << double(audioSamples.size())/metadata.samplerate/metadata.channels << " sec)" << endl;
+
+    // Save
     SF_INFO sfinfo = {};
     sfinfo.samplerate = metadata.samplerate;
     sfinfo.channels = metadata.channels;
@@ -470,6 +492,7 @@ void decompressAudio(const string& outputFile) {
     cout << "Decompressed to " << outputFile << endl;
 }
 
+// --- Main ---
 int main(int argc, char* argv[]) {
     try {
         if (argc > 1 && strcmp(argv[1], "-d") == 0) {
