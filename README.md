@@ -26,7 +26,7 @@ This is particularly effective after DCT and quantization, where many zeros appe
 A variable-length prefix code that adapts to the data being encoded. Frequently occurring
 symbols are assigned shorter codes, while less frequent ones get longer codes.
 
-## Usage
+## Compression Usage
 
 ```
 # Compile the program
@@ -37,6 +37,17 @@ $ g++ -std=c++11 -O3 -o EHCo EHCo.cpp -lsndfile -lpthread
 
 # Decompress (creates output.wav)
 ./audio_compressor -d
+```
+
+## Metrics Usage
+
+```
+# Compile the program
+g++ -std=c++11 -O2 -o audio_metrics.exe audio_metrics.cpp -lsndfile
+
+# Run Metrics
+./audio_metrics.exe input.wav output.wav
+
 ```
 
 ## Requirements
