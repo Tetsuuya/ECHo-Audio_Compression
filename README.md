@@ -30,7 +30,7 @@ symbols are assigned shorter codes, while less frequent ones get longer codes.
 
 ```
 # Compile the program
-$ g++ -std=c++11 -O3 -o ECHo ECHo.cpp -lsndfile -lpthread
+$ g++ -std=c++11 -O3 -o EHCo EHCo.cpp -lsndfile -lpthread
 
 # Compress an audio file
 ./audio_compressor input.wav
