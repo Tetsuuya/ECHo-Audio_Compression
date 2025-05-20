@@ -52,6 +52,7 @@ g++ -std=c++11 -O2 -o audio_metrics.exe audio_metrics.cpp -lsndfile
 
 ## Requirements
 
+- MSYS MINGW64
 - libsndfile (for audio I/O)
 - C++11 compatible compiler
 - Input audio should be in WAV format
