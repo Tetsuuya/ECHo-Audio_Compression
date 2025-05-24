@@ -23,7 +23,8 @@ double calculateMSE(const vector<double>& original, const vector<double>& compre
 // Calculate PSNR
 double calculatePSNR(double mse) {
     if (mse == 0) return INFINITY;
-    return 10.0 * log10((32767.0 * 32767.0) / mse);
+    // MAX^2 for normalized audio in [-1, 1] is 1.0 * 1.0 = 1.0
+    return 10.0 * log10(1.0 / mse);
 }
 
 // Calculate SNR
@@ -79,7 +80,7 @@ CompressionRatios calculateCompressionRatios(const string& inputFile, const stri
 vector<double> normalizeAudio(const vector<int16_t>& audio) {
     vector<double> normalized(audio.size());
     for (size_t i = 0; i < audio.size(); ++i) {
-        normalized[i] = audio[i] / 32768.0;
+        normalized[i] = audio[i] / 32767.0;
     }
     return normalized;
 }
@@ -168,6 +169,14 @@ void analyzeAudio(const string& inputFile, const string& outputFile) {
         throw runtime_error("Cannot open input file: " + string(sf_strerror(nullptr)));
     }
     
+    // Check if input is floating-point and report
+    bool isInputFloat = (inputInfo.format & SF_FORMAT_FLOAT) || (inputInfo.format & SF_FORMAT_DOUBLE);
+    if (isInputFloat) {
+        cout << "Input audio format: Floating-point (likely normalized)\n";
+    } else {
+        cout << "Input audio format: Integer (not floating-point)\n";
+    }
+
     // Open output file
     SF_INFO outputInfo = {};
     SNDFILE* outFile = sf_open(outputFile.c_str(), SFM_READ, &outputInfo);
