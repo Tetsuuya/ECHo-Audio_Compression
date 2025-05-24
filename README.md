@@ -10,7 +10,7 @@ This project implements an audio compression utility that uses several algorithm
 The code has been organized into two files:
 
 - `compression_algorithms.cpp` - Contains the implementations of the three core compression algorithms
-- `audio_compressor.cpp` - Main application that uses the algorithms to compress/decompress audio
+- `EHCo.cpp` - Main application that uses the algorithms to compress/decompress audio
 
 ## Algorithm Details
 
@@ -26,11 +26,11 @@ This is particularly effective after DCT and quantization, where many zeros appe
 A variable-length prefix code that adapts to the data being encoded. Frequently occurring
 symbols are assigned shorter codes, while less frequent ones get longer codes.
 
-## Usage
+## Compression Usage
 
 ```
 # Compile the program
-$ g++ -std=c++11 -O3 -o audio_compressor audio_compressor.cpp -lsndfile -lpthread
+$ g++ -std=c++11 -O3 -o EHCo EHCo.cpp -lsndfile -lpthread
 
 # Compress an audio file
 ./audio_compressor input.wav
@@ -39,8 +39,20 @@ $ g++ -std=c++11 -O3 -o audio_compressor audio_compressor.cpp -lsndfile -lpthrea
 ./audio_compressor -d
 ```
 
+## Metrics Usage
+
+```
+# Compile the program
+g++ -std=c++11 -O2 -o audio_metrics.exe audio_metrics.cpp -lsndfile
+
+# Run Metrics
+./audio_metrics.exe input.wav output.wav
+
+```
+
 ## Requirements
 
+- MSYS MINGW64
 - libsndfile (for audio I/O)
 - C++11 compatible compiler
 - Input audio should be in WAV format
