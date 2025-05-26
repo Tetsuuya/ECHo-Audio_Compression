@@ -127,8 +127,16 @@ double calculateTHD(const std::vector<double>& signal, double sampleRate) {
     while (N < signal.size()) N <<= 1;
     std::vector<double> padded = signal;
     padded.resize(N, 0.0);
+
+    // Apply Hanning window
+    std::vector<double> windowed_signal(N);
+    for (size_t i = 0; i < N; ++i) {
+        double window = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (N - 1)));
+        windowed_signal[i] = padded[i] * window;
+    }
+
     std::vector<std::complex<double>> spectrum(N);
-    fft(padded, spectrum);
+    fft(windowed_signal, spectrum); // Perform FFT on windowed signal
     // Compute magnitude spectrum
     std::vector<double> mag(N / 2);
     for (size_t i = 0; i < N / 2; ++i) {
@@ -144,16 +152,16 @@ double calculateTHD(const std::vector<double>& signal, double sampleRate) {
         }
     }
     // RMS of fundamental
-    double V1 = mag[fundamentalBin] / std::sqrt(2.0);
-    // RMS of harmonics (2nd to 5th)
-    double sumHarmonics2 = 0.0;
-    int maxHarmonic = 5;
-    for (int h = 2; h <= maxHarmonic; ++h) {
+    double V1 = mag[fundamentalBin] / std::sqrt(2.0); // RMS of fundamental
+    // RMS of harmonics (2nd to n-th)
+    double sumHarmonics2 = 0.0; // Sum of squares of RMS harmonics
+    for (int h = 2; ; ++h) {
         size_t bin = fundamentalBin * h;
-        if (bin < N / 2) {
-            double Vh = mag[bin] / std::sqrt(2.0);
-            sumHarmonics2 += Vh * Vh;
+        if (bin >= N / 2) {
+            break; // Stop if the harmonic bin is beyond the spectrum
         }
+        double Vh = mag[bin] / std::sqrt(2.0); // RMS of harmonic
+        sumHarmonics2 += Vh * Vh;
     }
     double thd = (V1 > 0) ? std::sqrt(sumHarmonics2) / V1 : 0.0;
     return thd;
@@ -208,7 +216,8 @@ void analyzeAudio(const string& inputFile, const string& outputFile) {
     double psnr = calculatePSNR(mse);
     double snr = calculateSNR(normalizedInput, normalizedOutput);
     CompressionRatios ratios = calculateCompressionRatios(inputFile, outputFile);
-    double thd = calculateTHD(normalizedOutput, outputInfo.samplerate);
+    double thd_output = calculateTHD(normalizedOutput, outputInfo.samplerate);
+    double thd_input = calculateTHD(normalizedInput, inputInfo.samplerate);
     
     // Print results
     cout << "\n=== Audio Quality Analysis Results ===\n";
@@ -221,7 +230,8 @@ void analyzeAudio(const string& inputFile, const string& outputFile) {
     cout << "SNR: " << snr << " dB\n";
     cout << "WAV Compression Ratio (input.wav:output.wav): " << ratios.wavRatio << ":1\n";
     cout << "Actual Compression Ratio (input.wav:compressed.bin): " << ratios.actualRatio << ":1\n";
-    cout << "THD: " << (thd * 100) << "%\n";
+    cout << "THD (Input): " << (thd_input * 100) << "%\n";
+    cout << "THD (Output): " << (thd_output * 100) << "%\n";
 }
 
 int main(int argc, char* argv[]) {

@@ -16,8 +16,8 @@
 using namespace std;
 
 const int CHUNK_SIZE = 4096;
-const int QUANTIZATION_FACTOR = 256;
-const double QUANTIZATION_THRESHOLD = 0.7;
+const int QUANTIZATION_FACTOR = 200;
+const double QUANTIZATION_THRESHOLD = 0.1;
 
 struct AudioMetadata {
     int samplerate, channels;
